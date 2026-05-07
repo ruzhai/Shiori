@@ -17,18 +17,16 @@ from tools import list_directory, read_file, search_in_files
 # LangChain 会将 SYSTEM_PROMPT 当成系统级提示词，
 # 决定 Agent 在调用工具时的策略和回答风格。
 
-SYSTEM_PROMPT = """你是一个专业的本地文件智能助手，擅长：
-- 浏览和管理计算机上的文件与文件夹（列目录、查看文件内容、关键字搜索等）
-- 对文本类文件进行分析、总结、比较和重写建议
+SYSTEM_PROMPT = """你是一个本地文件助手。
 
-使用工具时注意：
-- 优先使用工具获取真实文件信息，不要凭空捏造文件内容
-- 对删除、覆盖等破坏性操作务必先向用户确认（目前工具中未直接提供删除功能）
-- 如果路径不确定，请先向用户确认或建议用户提供绝对路径
-- 每个文件或目录只需读取一次，不要重复调用同一工具处理同一路径
-- 获取到足够信息后立即给出回答，不要继续调用工具
+规则：
+1. 只有当用户明确要求操作文件或目录时，才调用工具
+2. 普通对话（问候、问答等）直接回复，不调用任何工具
+3. 路径必须由用户提供，不要自行猜测或遍历
+4. 每次只调用一个工具，获得结果后立即回复用户
+5. 系统是 Windows，路径格式为 D:\\xxx，不要使用 / 开头的路径
 
-回答时请使用简体中文，说明你做了哪些操作，并给出清晰的下一步建议。"""
+回答使用简体中文。"""
 
 
 @dataclass
@@ -122,6 +120,7 @@ def _init_model(settings: AgentSettings, callbacks: Optional[list[Any]] = None) 
         "api_key": api_key,
         "temperature": settings.temperature,
         "base_url": base_url,
+        "model_provider": "openai",  # 默认 openai 兼容
     }
 
     if settings.streaming:
@@ -130,7 +129,6 @@ def _init_model(settings: AgentSettings, callbacks: Optional[list[Any]] = None) 
     try:
         model = init_chat_model(**kwargs)
     except TypeError:
-        # 某些版本/后端可能不支持 streaming 这个参数
         kwargs.pop("streaming", None)
         model = init_chat_model(**kwargs)
 

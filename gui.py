@@ -746,36 +746,32 @@ class FileAgentWindow(QWidget):
             self.btn_stop.setEnabled(False)
 
     def _apply_theme(self) -> None:
-        """极简纯色主题引擎 - 修复文字不可见问题"""
+        """Chatbox 风格优化"""
         if self.is_dark_mode:
-            # 极简深色 (全黑风格)
-            bg_main = "#000000"
-            bg_card = "#000000"      # 助手气泡也用黑色
-            bg_input = "#0a0a0a"
-            border_color = "#222222"  # 极细的深灰色线
-            text_primary = "#ffffff"
-            text_secondary = "#666666"
-            # 用户气泡：用深灰色或白色，这里建议用白色块但强制黑字
-            bubble_user_bg = "#ffffff"
-            bubble_user_text = "#000000"  # 强制黑字
+            bg_main = "#242424"
+            bg_card = "#2e2e2e"
+            bg_input = "#2e2e2e"
+            border_color = "#3e3e3e"
+            text_primary = "#e0e0e0"
+            text_secondary = "#a0a0a0"
+            bubble_user_bg = "#1971c2"
+            bubble_user_text = "#ffffff"
         else:
-            # 极简亮色 (全白风格)
             bg_main = "#ffffff"
-            bg_card = "#ffffff"
-            bg_input = "#fcfcfc"
-            border_color = "#eeeeee"
-            text_primary = "#000000"
-            text_secondary = "#999999"
-            # 用户气泡：黑色块但强制白字
-            bubble_user_bg = "#000000"
-            bubble_user_text = "#ffffff"  # 强制白字
+            bg_card = "#f8f8f8"
+            bg_input = "#f8f8f8"
+            border_color = "#e0e0e0"
+            text_primary = "#2e2e2e"
+            text_secondary = "#6e6e6e"
+            bubble_user_bg = "#228be6"
+            bubble_user_text = "#ffffff"
 
         self.setStyleSheet(f"""
             QWidget {{
                 background: {bg_main};
                 color: {text_primary};
-                font-family: "Microsoft YaHei UI", "微软雅黑", sans-serif;
-                font-size: 14px;
+                font-family: -apple-system, "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                font-size: 13px;
             }}
 
             /* 分割线 */

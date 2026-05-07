@@ -12,6 +12,10 @@ def list_directory(path: str) -> str:
     返回:
         一个可直接展示的文本列表，包含 [DIR]/[FILE] 标记及文件大小。
     """
+    # 拒绝根目录遍历，防止 agent 无目的地扫描整个磁盘
+    normalized = os.path.normpath(path)
+    if normalized in (r'C:\\', r'D:\\', r'E:\\', '/', 'C:', 'D:', 'E:'):
+        return "请提供具体的目录路径，而不是根目录。"
 
     if not os.path.exists(path):
         return f"目录不存在：{path}"
