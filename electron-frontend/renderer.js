@@ -1,8 +1,34 @@
 const React = require('react');
 const ReactDOM = require('react-dom/client');
-const { useState, useEffect } = React;
+const { useState, useEffect, useRef } = React;
 
 const BACKEND = 'http://localhost:5000';
+
+// ── 辅助函数 ──────────────────────────────────────────────
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function renderMarkdown(text) {
+  if (typeof marked === 'undefined') return escapeHtml(text);
+  try {
+    return marked.parse(text, { breaks: true, gfm: true });
+  } catch (_) {
+    return escapeHtml(text);
+  }
+}
+
+// ── 日志主题（颜色 / 图标）────────────────────────────────
+const LOG_THEME = {
+  user_message: { color: '#1971c2', icon: 'U', bg: 'rgba(25,113,194,0.15)' },
+  tool_start:   { color: '#f9a825', icon: '🔧', bg: 'rgba(249,168,37,0.12)' },
+  tool_end:     { color: '#66bb6a', icon: '✓', bg: 'rgba(102,187,106,0.12)' },
+  error:        { color: '#e53935', icon: '!', bg: 'rgba(229,57,53,0.12)' },
+  info:         { color: '#90a4ae', icon: 'i', bg: 'rgba(144,164,174,0.10)' },
+  complete:     { color: '#4caf50', icon: '●', bg: 'rgba(76,175,80,0.12)' },
+};
 
 // ── 样式常量 ──────────────────────────────────────────────
 const S = {
@@ -74,7 +100,7 @@ function SessionList({ sessions, current, onSelect, onNew, onSettings }) {
 
 // ── LogPanel ──────────────────────────────────────────────
 function LogPanel({ logs, onClear }) {
-  const ref = React.useRef(null);
+  const ref = useRef(null);
   useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
 
   return React.createElement('div', {
@@ -83,44 +109,115 @@ function LogPanel({ logs, onClear }) {
     React.createElement('div', {
       style: { padding: '10px 14px', borderBottom: '1px solid #3e3e3e', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }
     },
-      React.createElement('span', { style: { fontSize: '12px', fontWeight: '600', color: '#a0a0a0' } }, '运行详情'),
+      React.createElement('span', { style: { fontSize: '12px', fontWeight: '600', color: '#a0a0a0' } }, '运行流程'),
       React.createElement('button', { onClick: onClear, style: { ...S.btn(), padding: '3px 8px', fontSize: '11px', flex: 'none' } }, '清空')
     ),
     React.createElement('div', {
       ref,
-      style: { flex: 1, overflowY: 'auto', padding: '10px', fontSize: '11px', fontFamily: 'Consolas, monospace', color: '#888', lineHeight: '1.6' }
+      style: { flex: 1, overflowY: 'auto', padding: '12px 10px', fontSize: '11px', fontFamily: '-apple-system, "Microsoft YaHei UI", sans-serif' }
     },
       logs.length === 0
-        ? React.createElement('div', { style: { color: '#555' } }, '等待运行...')
-        : logs.map((log, i) => React.createElement('div', { key: i, style: { marginBottom: '6px', whiteSpace: 'pre-wrap', borderBottom: '1px solid #2a2a2a', paddingBottom: '6px' } }, log))
+        ? React.createElement('div', { style: { color: '#555', textAlign: 'center', marginTop: '20px' } }, '等待运行...')
+        : logs.map((entry, i) => {
+            const theme = LOG_THEME[entry.type] || LOG_THEME.info;
+            const isLast = i === logs.length - 1;
+
+            return React.createElement('div', {
+              key: entry.id,
+              style: { position: 'relative', paddingLeft: '24px', marginBottom: isLast ? '0' : '1px' }
+            },
+              // 连接线（最后一个节点不画）
+              !isLast && React.createElement('div', {
+                style: {
+                  position: 'absolute', left: '7px', top: '20px',
+                  width: '2px', height: 'calc(100% - 2px)',
+                  background: '#3e3e3e'
+                }
+              }),
+              // 圆点标记
+              React.createElement('div', {
+                style: {
+                  position: 'absolute', left: '1px', top: '4px',
+                  width: '14px', height: '14px', borderRadius: '50%',
+                  background: theme.color,
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  fontSize: '9px', color: '#fff', lineHeight: 1, fontWeight: '700'
+                }
+              }, theme.icon),
+              // 标签 + 时间戳
+              React.createElement('div', {
+                style: { display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }
+              },
+                React.createElement('span', { style: { fontWeight: '600', color: theme.color } }, entry.label),
+                React.createElement('span', { style: { color: '#555', fontSize: '10px' } }, entry.timestamp)
+              ),
+              // 详情（如果有内容）
+              entry.detail && React.createElement('div', {
+                style: {
+                  color: '#888', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                  background: theme.bg, borderRadius: '4px', padding: '4px 6px',
+                  marginTop: '2px', fontSize: '10px', lineHeight: '1.4',
+                  maxHeight: '80px', overflowY: 'auto'
+                }
+              }, entry.detail)
+            );
+          })
     )
   );
 }
 
 // ── ChatArea ──────────────────────────────────────────────
 function ChatArea({ messages, input, setInput, onSend, onStop, agentReady, running }) {
-  const bottomRef = React.useRef(null);
+  const bottomRef = useRef(null);
   useEffect(() => { if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+  // 状态栏
+  const statusText = running
+    ? '◉ 思考中...'
+    : agentReady
+      ? '● Agent 就绪'
+      : '● 未初始化 — 请点击设置配置 API';
+  const statusColor = running ? '#4caf50' : agentReady ? '#4caf50' : '#ff9800';
 
   return React.createElement('div', { style: { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 } },
     // 状态栏
     React.createElement('div', {
-      style: { padding: '6px 16px', borderBottom: '1px solid #3e3e3e', fontSize: '11px', color: agentReady ? '#4caf50' : '#ff9800' }
-    }, agentReady ? '● Agent 就绪' : '● 未初始化 — 请点击设置配置 API'),
+      style: { padding: '6px 16px', borderBottom: '1px solid #3e3e3e', fontSize: '11px', color: statusColor }
+    },
+      React.createElement('span', {
+        style: running ? {
+          display: 'inline-block',
+          animation: 'pulse-dot 0.85s ease-in-out infinite',
+        } : { display: 'inline-block' }
+      }, statusText)
+    ),
     // 消息列表
     React.createElement('div', { style: { flex: 1, overflowY: 'auto', padding: '16px' } },
-      messages.map((msg, i) => React.createElement('div', {
-        key: i,
-        style: { marginBottom: '16px', display: 'flex', justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }
-      },
-        React.createElement('div', {
-          style: {
-            maxWidth: '72%', padding: '10px 14px', borderRadius: '12px',
-            background: msg.role === 'user' ? '#1971c2' : '#2e2e2e',
-            color: '#e0e0e0', fontSize: '13px', lineHeight: '1.6', whiteSpace: 'pre-wrap'
-          }
-        }, msg.content)
-      )),
+      messages.map((msg, i) => {
+        const isUser = msg.role === 'user';
+        return React.createElement('div', {
+          key: i,
+          style: { marginBottom: '16px', display: 'flex', justifyContent: isUser ? 'flex-end' : 'flex-start' }
+        },
+          React.createElement('div', {
+            style: {
+              maxWidth: isUser ? '72%' : '85%',
+              padding: '10px 14px', borderRadius: '12px',
+              background: isUser ? '#1971c2' : '#2e2e2e',
+              color: '#e0e0e0', fontSize: '13px', lineHeight: '1.6',
+              whiteSpace: isUser ? 'pre-wrap' : 'normal',
+              overflowX: 'auto',
+            }
+          },
+            isUser
+              ? msg.content
+              : React.createElement('div', {
+                  className: 'markdown-content',
+                  dangerouslySetInnerHTML: { __html: renderMarkdown(msg.content) },
+                })
+          )
+        );
+      }),
       React.createElement('div', { ref: bottomRef })
     ),
     // 输入框
@@ -129,7 +226,7 @@ function ChatArea({ messages, input, setInput, onSend, onStop, agentReady, runni
         type: 'text', value: input,
         onChange: e => setInput(e.target.value),
         onKeyDown: e => { if (e.key === 'Enter' && !e.shiftKey && !running && input.trim()) { e.preventDefault(); onSend(input); setInput(''); } },
-        placeholder: running ? '运行中...' : '输入你的需求（Enter 发送）...',
+        placeholder: running ? '思考中...' : '输入你的需求（Enter 发送）...',
         disabled: running,
         style: { flex: 1, padding: '10px 14px', background: '#2e2e2e', border: '1px solid #3e3e3e', borderRadius: '8px', color: '#e0e0e0', fontSize: '13px', outline: 'none', opacity: running ? 0.6 : 1 }
       }),
@@ -157,7 +254,17 @@ function App() {
   const [agentReady, setAgentReady] = useState(false);
   const [running, setRunning] = useState(false);
 
-  const addLog = (msg) => setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  let logIdCounter = 0;
+  const addLog = (type, label, detail) => {
+    const entry = {
+      id: ++logIdCounter,
+      type,
+      label,
+      detail: detail || '',
+      timestamp: new Date().toLocaleTimeString(),
+    };
+    setLogs(prev => [...prev, entry]);
+  };
 
   const initAgent = async (settings) => {
     try {
@@ -166,9 +273,9 @@ function App() {
         body: JSON.stringify(settings)
       });
       const data = await res.json();
-      if (data.status === 'ok') { setAgentReady(true); addLog('Agent 初始化成功'); }
-      else { addLog(`初始化失败: ${data.error}`); }
-    } catch (e) { addLog(`无法连接后端: ${e.message}`); }
+      if (data.status === 'ok') { setAgentReady(true); addLog('info', 'Agent', '初始化成功'); }
+      else { addLog('error', '初始化', data.error); }
+    } catch (e) { addLog('error', '连接', `无法连接后端: ${e.message}`); }
   };
 
   useEffect(() => {
@@ -178,16 +285,17 @@ function App() {
 
   const handleStop = async () => {
     await fetch(`${BACKEND}/api/stop`, { method: 'POST' });
-    setRunning(false);
-    addLog('已停止');
+    addLog('info', '停止', '用户停止了运行');
   };
 
   const handleSend = async (text) => {
     setMessages(prev => [...prev, { role: 'user', content: text }]);
-    addLog(`发送: ${text.slice(0, 50)}`);
+    addLog('user_message', '用户', text.slice(0, 100));
     setRunning(true);
+
     if (!agentReady) {
       setMessages(prev => [...prev, { role: 'assistant', content: '请先在设置中配置 API Key / Base URL / Model' }]);
+      setRunning(false);
       return;
     }
 
@@ -212,20 +320,20 @@ function App() {
           if (raw === '[DONE]') continue;
           try {
             const ev = JSON.parse(raw);
-            if (ev.type === 'tool_start') addLog(`🔧 ${ev.tool}\n   ${ev.input}`);
-            else if (ev.type === 'tool_end') addLog(`✓ ${ev.tool}\n   ${ev.output}`);
+            if (ev.type === 'tool_start') addLog('tool_start', ev.tool, ev.input);
+            else if (ev.type === 'tool_end') addLog('tool_end', ev.tool, ev.output);
             else if (ev.type === 'content' && ev.data) {
               content = ev.data;
               setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content }; return m; });
             }
-            else if (ev.type === 'error') addLog(`错误: ${ev.data}`);
+            else if (ev.type === 'error') addLog('error', '错误', ev.data);
           } catch (_) {}
         }
       }
-      addLog('完成');
+      addLog('complete', '完成', content ? `回复 ${content.length} 字符` : '');
     } catch (e) {
-      addLog(`请求失败: ${e.message}`);
-      setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content: `错误: ${e.message}` }; return m; });
+      addLog('error', '请求', e.message);
+      setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content: '错误: ' + e.message }; return m; });
     } finally {
       setRunning(false);
     }
