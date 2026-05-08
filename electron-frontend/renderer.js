@@ -76,8 +76,37 @@ function SettingsModal({ onClose, onSave }) {
   );
 }
 
+// ── SessionItem ───────────────────────────────────────────
+function SessionItem({ session, isCurrent, onSelect, onDelete }) {
+  const [hover, setHover] = useState(false);
+  return React.createElement('div', {
+    onMouseEnter: () => setHover(true),
+    onMouseLeave: () => setHover(false),
+    onClick: () => onSelect(session.id),
+    style: {
+      padding: '10px 12px', borderRadius: '6px', cursor: 'pointer', marginBottom: '4px',
+      background: isCurrent ? '#2e2e2e' : 'transparent', fontSize: '13px',
+      display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+      transition: 'background 0.15s',
+    }
+  },
+    React.createElement('span', {
+      style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }
+    }, session.title),
+    (hover || isCurrent) && React.createElement('button', {
+      onClick: (e) => { e.stopPropagation(); onDelete(session.id); },
+      style: {
+        marginLeft: '6px', width: '20px', height: '20px', borderRadius: '50%',
+        border: 'none', background: 'rgba(229,57,53,0.15)', color: '#e53935',
+        cursor: 'pointer', fontSize: '12px', lineHeight: 1, display: 'flex',
+        alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+      }
+    }, '×')
+  );
+}
+
 // ── SessionList ───────────────────────────────────────────
-function SessionList({ sessions, current, onSelect, onNew, onSettings }) {
+function SessionList({ sessions, current, onSelect, onNew, onDelete, onSettings }) {
   return React.createElement('div', {
     style: { width: '220px', borderRight: '1px solid #3e3e3e', display: 'flex', flexDirection: 'column', background: '#1e1e1e' }
   },
@@ -86,14 +115,13 @@ function SessionList({ sessions, current, onSelect, onNew, onSettings }) {
       React.createElement('button', { onClick: onSettings, style: { ...S.btn(), flex: 1, padding: '8px 6px' } }, '⚙')
     ),
     React.createElement('div', { style: { flex: 1, overflowY: 'auto', padding: '8px' } },
-      sessions.map(s => React.createElement('div', {
+      sessions.map(s => React.createElement(SessionItem, {
         key: s.id,
-        onClick: () => onSelect(s.id),
-        style: {
-          padding: '10px 12px', borderRadius: '6px', cursor: 'pointer', marginBottom: '4px',
-          background: s.id === current ? '#2e2e2e' : 'transparent', fontSize: '13px'
-        }
-      }, s.title))
+        session: s,
+        isCurrent: s.id === current,
+        onSelect: onSelect,
+        onDelete: onDelete,
+      }))
     )
   );
 }
@@ -243,16 +271,53 @@ function ChatArea({ messages, input, setInput, onSend, onStop, agentReady, runni
   );
 }
 
+// ── 持久化辅助函数 ─────────────────────────────────────────
+const LS_SESSIONS = 'shiori_sessions';
+
+function loadSessions() {
+  try { return JSON.parse(localStorage.getItem(LS_SESSIONS)) || []; }
+  catch (_) { return []; }
+}
+function saveSessions(sessions) {
+  localStorage.setItem(LS_SESSIONS, JSON.stringify(sessions));
+}
+function loadMessages(threadId) {
+  try { return JSON.parse(localStorage.getItem('shiori_msgs_' + threadId)) || []; }
+  catch (_) { return []; }
+}
+function saveMessages(threadId, msgs) {
+  try { localStorage.setItem('shiori_msgs_' + threadId, JSON.stringify(msgs)); }
+  catch (_) {}
+}
+
+const DEFAULT_WELCOME = [{ role: 'assistant', content: '你好，我是 Shiori，一个文件 agent 助手。' }];
+
 // ── App ───────────────────────────────────────────────────
 function App() {
-  const [sessions, setSessions] = useState([{ id: '1', title: '新对话' }]);
-  const [current, setCurrent] = useState('1');
-  const [messages, setMessages] = useState([{ role: 'assistant', content: '你好，我是 Shiori，一个文件 agent 助手。' }]);
+  const initialSessions = loadSessions();
+  const hasSaved = initialSessions.length > 0;
+  const initId = hasSaved ? initialSessions[0].id : '1';
+
+  const [sessions, setSessions] = useState(
+    hasSaved ? initialSessions : [{ id: '1', title: '新对话', thread_id: crypto.randomUUID(), updatedAt: Date.now() }]
+  );
+  const [current, setCurrent] = useState(initId);
+  const [messages, setMessages] = useState(() => {
+    if (hasSaved) return loadMessages(initialSessions[0].thread_id);
+    return DEFAULT_WELCOME;
+  });
   const [input, setInput] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [logs, setLogs] = useState([]);
   const [agentReady, setAgentReady] = useState(false);
   const [running, setRunning] = useState(false);
+
+  // 首次无会话时持久化默认会话
+  useEffect(() => {
+    if (!hasSaved) {
+      saveSessions(sessions);
+    }
+  }, []);
 
   let logIdCounter = 0;
   const addLog = (type, label, detail) => {
@@ -283,12 +348,68 @@ function App() {
     if (saved) initAgent(JSON.parse(saved));
   }, []);
 
+  // 切换会话时保存/加载消息
+  const switchSession = (id) => {
+    const curSes = sessions.find(s => s.id === current);
+    if (curSes) saveMessages(curSes.thread_id, messages);
+    setCurrent(id);
+    setLogs([]);
+    const target = sessions.find(s => s.id === id);
+    if (target) {
+      const msgs = loadMessages(target.thread_id);
+      setMessages(msgs.length > 0 ? msgs : DEFAULT_WELCOME);
+    }
+  };
+
+  const handleNew = () => {
+    const curSes = sessions.find(s => s.id === current);
+    if (curSes) saveMessages(curSes.thread_id, messages);
+    const id = Date.now().toString();
+    const thread_id = crypto.randomUUID();
+    const newSes = { id, title: '新对话', thread_id, updatedAt: Date.now() };
+    const updated = [newSes, ...sessions];
+    setSessions(updated);
+    saveSessions(updated);
+    setCurrent(id);
+    setMessages(DEFAULT_WELCOME);
+    setLogs([]);
+  };
+
+  const handleDelete = async (id) => {
+    const ses = sessions.find(s => s.id === id);
+    if (ses) {
+      try { await fetch(`${BACKEND}/api/threads/${ses.thread_id}`, { method: 'DELETE' }); }
+      catch (_) {}
+      localStorage.removeItem('shiori_msgs_' + ses.thread_id);
+    }
+    const updated = sessions.filter(s => s.id !== id);
+    if (updated.length === 0) {
+      const id2 = Date.now().toString();
+      const thread_id = crypto.randomUUID();
+      const newSes = { id: id2, title: '新对话', thread_id, updatedAt: Date.now() };
+      updated.push(newSes);
+      localStorage.removeItem('shiori_msgs_' + (ses ? ses.thread_id : ''));
+    }
+    setSessions(updated);
+    saveSessions(updated);
+    if (current === id) {
+      const next = updated[0];
+      setCurrent(next.id);
+      setMessages(loadMessages(next.thread_id));
+    }
+    setLogs([]);
+  };
+
   const handleStop = async () => {
     await fetch(`${BACKEND}/api/stop`, { method: 'POST' });
     addLog('info', '停止', '用户停止了运行');
   };
 
   const handleSend = async (text) => {
+    const ses = sessions.find(s => s.id === current);
+    if (!ses) return;
+    const thread_id = ses.thread_id;
+
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     addLog('user_message', '用户', text.slice(0, 100));
     setRunning(true);
@@ -304,7 +425,7 @@ function App() {
     try {
       const res = await fetch(`${BACKEND}/api/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text })
+        body: JSON.stringify({ message: text, thread_id })
       });
 
       const reader = res.body.getReader();
@@ -331,6 +452,8 @@ function App() {
         }
       }
       addLog('complete', '完成', content ? `回复 ${content.length} 字符` : '');
+      // 完成时持久化消息
+      setMessages(prev => { saveMessages(thread_id, prev); return prev; });
     } catch (e) {
       addLog('error', '请求', e.message);
       setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content: '错误: ' + e.message }; return m; });
@@ -342,7 +465,7 @@ function App() {
   return React.createElement('div', {
     style: { display: 'flex', height: '100vh', background: '#242424', color: '#e0e0e0', fontFamily: '-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif', fontSize: '13px' }
   },
-    React.createElement(SessionList, { sessions, current, onSelect: setCurrent, onNew: () => { const id = Date.now().toString(); setSessions(prev => [...prev, { id, title: '新对话' }]); setCurrent(id); setMessages([{ role: 'assistant', content: '你好！有什么可以帮你的？' }]); }, onSettings: () => setShowSettings(true) }),
+    React.createElement(SessionList, { sessions, current, onSelect: switchSession, onNew: handleNew, onDelete: handleDelete, onSettings: () => setShowSettings(true) }),
     React.createElement(ChatArea, { messages, input, setInput, onSend: handleSend, onStop: handleStop, agentReady, running }),
     React.createElement(LogPanel, { logs, onClear: () => setLogs([]) }),
     showSettings && React.createElement(SettingsModal, { onClose: () => setShowSettings(false), onSave: initAgent })

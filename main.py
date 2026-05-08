@@ -222,10 +222,13 @@ def list_threads(db_path: str) -> list[str]:
 
 def delete_thread(db_path: str, thread_id: str) -> None:
     import sqlite3
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.execute('DELETE FROM checkpoints WHERE thread_id=?', (thread_id,))
-    conn.execute('DELETE FROM writes WHERE thread_id=?', (thread_id,))
-    conn.commit()
+    try:
+        conn = sqlite3.connect(db_path, check_same_thread=False)
+        conn.execute('DELETE FROM checkpoints WHERE thread_id=?', (thread_id,))
+        conn.execute('DELETE FROM writes WHERE thread_id=?', (thread_id,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
 
 def get_thread_messages(db_path: str, thread_id: str) -> list[dict]:

@@ -7,6 +7,7 @@ import socket
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import create_file_agent, AgentSettings, SYSTEM_PROMPT
+from main import list_threads, delete_thread, get_thread_messages
 
 STRICT_SYSTEM_PROMPT = """你是一个本地文件助手，工作在 Windows 系统上。
 
@@ -52,6 +53,9 @@ agent = None
 config = None
 stop_flag = False
 
+def _db_path():
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'electron_agent.db')
+
 @app.route('/api/stop', methods=['POST'])
 def stop():
     global stop_flag
@@ -67,13 +71,6 @@ def init_agent():
     global agent, config
     data = request.json
     try:
-        # 删除旧数据库避免脏历史
-        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'electron_agent.db')
-        for f in [db_path, db_path + '-shm', db_path + '-wal']:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
         settings = AgentSettings(
             api_key=data.get('api_key'),
             base_url=data.get('base_url'),
@@ -102,6 +99,7 @@ def chat():
         return jsonify({'error': 'Agent not initialized'}), 400
     data = request.json
     message = data.get('message', '')
+    thread_id = data.get('thread_id', 'electron-session')
 
     def generate():
         global stop_flag
@@ -115,7 +113,7 @@ def chat():
                 tool_call_count = 0
                 for chunk in agent.stream(
                     {"messages": [{"role": "user", "content": message}]},
-                    {**config, "recursion_limit": 25},
+                    {**config, "configurable": {"thread_id": thread_id}, "recursion_limit": 25},
                     stream_mode='updates'
                 ):
                     if stop_flag:
@@ -154,6 +152,19 @@ def chat():
 
     return Response(generate(), mimetype='text/event-stream',
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+@app.route('/api/threads', methods=['GET'])
+def list_threads_api():
+    return jsonify({'threads': list_threads(_db_path())})
+
+@app.route('/api/threads/<thread_id>', methods=['DELETE'])
+def delete_thread_api(thread_id):
+    delete_thread(_db_path(), thread_id)
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/threads/<thread_id>/messages', methods=['GET'])
+def get_thread_messages_api(thread_id):
+    return jsonify({'messages': get_thread_messages(_db_path(), thread_id)})
 
 if __name__ == '__main__':
     if is_port_in_use(5000):
