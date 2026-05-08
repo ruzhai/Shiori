@@ -3,6 +3,7 @@ from flask_cors import CORS
 import json
 import sys
 import os
+import socket
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import create_file_agent, AgentSettings, SYSTEM_PROMPT
@@ -17,6 +18,16 @@ STRICT_SYSTEM_PROMPT = """你是一个本地文件助手。
 5. 系统是 Windows，路径格式为 D:\\xxx，不要使用 / 开头的路径
 
 回答使用简体中文。"""
+
+def is_port_in_use(port):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(('127.0.0.1', port))
+            s.close()
+            return False
+        except OSError:
+            return True
 
 app = Flask(__name__)
 CORS(app)
@@ -41,9 +52,12 @@ def init_agent():
     data = request.json
     try:
         # 删除旧数据库避免脏历史
-        db_path = 'electron_agent.db'
-        if os.path.exists(db_path):
-            os.remove(db_path)
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'electron_agent.db')
+        for f in [db_path, db_path + '-shm', db_path + '-wal']:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
         settings = AgentSettings(
             api_key=data.get('api_key'),
             base_url=data.get('base_url'),
@@ -113,4 +127,7 @@ def chat():
                     headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 if __name__ == '__main__':
+    if is_port_in_use(5000):
+        print('Port 5000 is already in use. Exiting.')
+        sys.exit(1)
     app.run(port=5000, debug=False, threaded=True)
