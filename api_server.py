@@ -52,6 +52,7 @@ CORS(app)
 agent = None
 config = None
 stop_flag = False
+saved_settings = None
 
 def _db_path():
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'electron_agent.db')
@@ -66,10 +67,37 @@ def stop():
 def test():
     return jsonify({'status': 'ok'})
 
+@app.route('/api/generate_title', methods=['POST'])
+def generate_title():
+    global saved_settings
+    if not saved_settings:
+        return jsonify({'title': '新对话'})
+    message = request.json.get('message', '')
+    if not message:
+        return jsonify({'title': '新对话'})
+    try:
+        from langchain.chat_models import init_chat_model
+        title_model = init_chat_model(
+            model=saved_settings.get('model', ''),
+            api_key=saved_settings.get('api_key', ''),
+            base_url=saved_settings.get('base_url', ''),
+            temperature=0,
+            model_provider='openai',
+        )
+        resp = title_model.invoke([
+            {'role': 'system', 'content': '你是一个标题生成器。根据用户的第一条消息，生成一个简短的对话标题（2-8个汉字）。只回复标题本身，不要加引号、句号或任何解释。'},
+            {'role': 'user', 'content': f'为以下对话起个简短标题：\n\n{message}'}
+        ])
+        title = resp.content.strip()[:20]
+        return jsonify({'title': title or '新对话'})
+    except Exception:
+        return jsonify({'title': '新对话'})
+
 @app.route('/api/init', methods=['POST'])
 def init_agent():
-    global agent, config
+    global agent, config, saved_settings
     data = request.json
+    saved_settings = data
     try:
         settings = AgentSettings(
             api_key=data.get('api_key'),

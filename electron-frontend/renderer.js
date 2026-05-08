@@ -412,6 +412,24 @@ function App() {
 
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     addLog('user_message', '用户', text.slice(0, 100));
+
+    // 第一条消息异步生成会话标题
+    if (ses.title === '新对话') {
+      fetch(`${BACKEND}/api/generate_title`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text })
+      }).then(r => r.json()).then(data => {
+        if (data.title && data.title !== '新对话') {
+          setSessions(prev => {
+            const updated = prev.map(s => s.id === current ? { ...s, title: data.title, updatedAt: Date.now() } : s);
+            saveSessions(updated);
+            return updated;
+          });
+        }
+      }).catch(() => {});
+    }
+
     setRunning(true);
 
     if (!agentReady) {
