@@ -7,4 +7,3 @@ langchain-deepseek
 langchain-anthropic
 pydantic>=2.6.0
 openai>=1.35.0
-PyQt5

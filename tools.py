@@ -1,118 +1,196 @@
 import os
+import queue
+import subprocess
+import threading
 
 from langchain.tools import tool
 
 
-@tool
-def list_directory(path: str) -> str:
-    """列出某个目录下的文件和子目录。
+# =========================
+# 确认上下文（线程安全）
+# =========================
 
-    参数:
-        path: 要查看的目录绝对路径（建议由前端或用户明确指定）。
-    返回:
-        一个可直接展示的文本列表，包含 [DIR]/[FILE] 标记及文件大小。
-    """
-    # 拒绝根目录遍历，防止 agent 无目的地扫描整个磁盘
-    normalized = os.path.normpath(path)
-    if normalized in (r'C:\\', r'D:\\', r'E:\\', '/', 'C:', 'D:', 'E:'):
-        return "请提供具体的目录路径，而不是根目录。"
+class ConfirmContext:
+    """Agent 线程与 SSE 主线程之间的命令确认通信桥梁。
 
-    if not os.path.exists(path):
-        return f"目录不存在：{path}"
-    if not os.path.isdir(path):
-        return f"给定路径不是目录：{path}"
-
-    try:
-        entries = os.listdir(path)
-    except Exception as e:
-        return f"读取目录失败：{e}"
-
-    if not entries:
-        return f"目录为空：{path}"
-
-    lines: list[str] = []
-    for name in entries:
-        full = os.path.join(path, name)
-        if os.path.isdir(full):
-            lines.append(f"[DIR]  {name}")
-        else:
-            try:
-                size = os.path.getsize(full)
-                lines.append(f"[FILE] {name}  ({size} bytes)")
-            except OSError:
-                lines.append(f"[FILE] {name}")
-
-    return "目录内容：\n" + "\n".join(sorted(lines))
-
-
-@tool
-def read_file(path: str, max_chars: int = 4000, start: int = 0) -> str:
-    """读取指定文本文件内容，用于分析和总结。
-
-    参数:
-        path: 文件绝对路径
-        max_chars: 最多读取的字符数（默认 4000）
-        start: 从第几个字符开始读取（默认 0，即从头开始）
-
-    注意：仅按 UTF-8 尝试解码，二进制文件会被自动过滤。
+    Agent 线程调用 request_confirm() 阻塞等待。
+    SSE 主线程调用 poll_pending() 获取待确认请求，yield 给前端。
+    前端确认后通过 /api/confirm 调用 resolve() 解阻塞。
     """
 
-    if not os.path.exists(path):
-        return f"文件不存在：{path}"
-    if not os.path.isfile(path):
-        return f"给定路径不是文件：{path}"
+    def __init__(self, whitelist: set[str] | None = None, timeout: float = 120.0):
+        self._queue: queue.Queue = queue.Queue()
+        self._events: dict[int, threading.Event] = {}
+        self._results: dict[int, bool] = {}
+        self._lock = threading.Lock()
+        self._counter: int = 0
+        self._timeout = timeout
+        self._whitelist: set[str] = set(whitelist or [])
 
-    try:
-        with open(path, "r", encoding="utf-8", errors="ignore") as f:
-            all_content = f.read()
-    except Exception as e:
-        return f"读取文件失败：{e}"
+    @staticmethod
+    def _extract_pattern(command: str) -> str:
+        """提取命令模式：取第一个词，如 'dir "path"' → 'dir'。"""
+        parts = command.strip().split(maxsplit=1)
+        return parts[0].lower() if parts else ""
 
-    total = len(all_content)
-    if start >= total:
-        return f"文件路径：{path}\n文件总字符数：{total}，start={start} 已超出文件末尾，无更多内容。"
+    def _is_whitelisted(self, command: str) -> bool:
+        """检查命令是否命中白名单（前缀匹配）。"""
+        cmd_lower = command.strip().lower()
+        for pattern in self._whitelist:
+            if cmd_lower.startswith(pattern):
+                return True
+        return False
 
-    chunk = all_content[start: start + max_chars]
-    end = start + len(chunk)
-    suffix = f"\n\n[已读取字符 {start}–{end} / 共 {total}。{'文件已读完。' if end >= total else f'如需继续，请用 start={end} 调用。'}]"
-    return f"文件路径：{path}\n=== 内容开始 ===\n{chunk}{suffix}"
+    def add_whitelist(self, pattern: str) -> None:
+        """添加一个模式到白名单。"""
+        with self._lock:
+            self._whitelist.add(pattern.lower())
+
+    def request_confirm(self, command: str, working_dir: str) -> bool:
+        """Agent 线程调用，先查白名单，未命中则阻塞等待用户确认。"""
+        # 白名单命中 → 直接批准
+        if self._is_whitelisted(command):
+            return True
+
+        with self._lock:
+            self._counter += 1
+            req_id = self._counter
+            event = threading.Event()
+            self._events[req_id] = event
+
+        self._queue.put({
+            "id": req_id,
+            "command": command,
+            "working_dir": working_dir,
+        })
+
+        resolved = event.wait(timeout=self._timeout)
+
+        with self._lock:
+            result = self._results.pop(req_id, False) if resolved else False
+            self._events.pop(req_id, None)
+            self._results.pop(req_id, None)
+
+        return result
+
+    def poll_pending(self) -> dict | None:
+        """非阻塞轮询，返回下一个待确认请求或 None。"""
+        try:
+            return self._queue.get_nowait()
+        except queue.Empty:
+            return None
+
+    def resolve(self, req_id: int, approved: bool) -> None:
+        """主线程调用（来自 /api/confirm），解除 Agent 线程阻塞。"""
+        with self._lock:
+            self._results[req_id] = approved
+            event = self._events.get(req_id)
+        if event:
+            event.set()
+
+    def is_resolved(self, req_id: int) -> bool:
+        """检查某个请求是否已被处理。"""
+        with self._lock:
+            event = self._events.get(req_id)
+        return event is None or event.is_set()
+
+    def reject_all_pending(self) -> None:
+        """拒绝所有等待中的请求（停止时调用）。"""
+        with self._lock:
+            for rid in list(self._events.keys()):
+                self._results[rid] = False
+                event = self._events.get(rid)
+                if event:
+                    event.set()
+
+
+# 模块级确认上下文（由 api_server 注入）
+_confirm_ctx: ConfirmContext | None = None
+
+
+def set_confirm_context(ctx: ConfirmContext) -> None:
+    global _confirm_ctx
+    _confirm_ctx = ctx
+
+
+def clear_confirm_context() -> None:
+    global _confirm_ctx
+    _confirm_ctx = None
+
+
+# =========================
+# 工具定义
+# =========================
 
 
 @tool
-def search_in_files(root: str, keyword: str, max_results: int = 20) -> str:
-    """在某个目录（包含子目录）下搜索包含指定关键字的文本文件。
+def run_command(command: str, working_dir: str = "") -> str:
+    """在 Windows 命令行中执行一条命令并返回输出。
+
+    所有命令执行前都会请求用户在界面上确认。
 
     参数：
-    - root: 起始搜索目录绝对路径
-    - keyword: 要搜索的字符串
-    - max_results: 最多返回多少条匹配结果
+    - command: 要执行的命令（字符串），例如 "dir D:\\projects" 或 "python --version"
+    - working_dir: 工作目录（可选），默认为当前项目目录
+
+    常用命令：
+    - dir 路径 — 列出目录内容
+    - type 文件 — 读取文件内容
+    - findstr /s "关键字" "路径\\*" — 搜索文件内容
+    - git status / git log — 查看 Git 状态
+    - python --version / pip list — 查看 Python 环境
+
+    注意：
+    - 命令执行有输出上限，过长会被截断
+    - 所有命令需用户确认后才会执行
     """
 
-    if not os.path.exists(root):
-        return f"目录不存在：{root}"
-    if not os.path.isdir(root):
-        return f"给定路径不是目录：{root}"
+    cwd = working_dir if (working_dir and os.path.isdir(working_dir)) else os.getcwd()
 
-    matches: list[str] = []
-    for dirpath, _, filenames in os.walk(root):
-        for filename in filenames:
-            if len(matches) >= max_results:
-                break
-            full_path = os.path.join(dirpath, filename)
-            # 只尝试按文本方式打开，二进制大文件会被自动跳过
-            try:
-                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                    for line_no, line in enumerate(f, start=1):
-                        if keyword in line:
-                            snippet = line.strip()
-                            matches.append(f"{full_path} (L{line_no}): {snippet[:200]}")
-                            break
-            except Exception:
-                continue
+    # —— 确认门 ——
+    global _confirm_ctx
+    if _confirm_ctx is not None:
+        approved = _confirm_ctx.request_confirm(command, cwd)
+        if not approved:
+            return (
+                "[已拒绝] 用户拒绝了该命令的执行。\n"
+                f"被拒绝的命令：{command}"
+            )
+    else:
+        return (
+            "[已拒绝] 确认机制未启用，无法执行命令。\n"
+            "请通过 Shiori 应用界面发起操作。"
+        )
 
-    if not matches:
-        return f"在目录 {root} 下未找到包含 {keyword!r} 的文本文件。"
+    # —— 执行 ——
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except Exception as e:
+        return f"[错误] 无法执行命令：{e}"
 
-    header = f"在目录 {root} 下找到包含 {keyword!r} 的文件（最多 {max_results} 条）："
-    return header + "\n" + "\n".join(matches)
+    stdout = result.stdout or ""
+    stderr = result.stderr or ""
+    output_parts = [f"[工作目录] {cwd}"]
+    if stdout:
+        out = stdout[:8000]
+        if len(stdout) > 8000:
+            out += f"\n...（已截断，共 {len(stdout)} 字符）"
+        output_parts.append(f"[stdout]\n{out}")
+    if stderr:
+        err = stderr[:2000]
+        if len(stderr) > 2000:
+            err += f"\n...（已截断，共 {len(stderr)} 字符）"
+        output_parts.append(f"[stderr]\n{err}")
+    if not stdout and not stderr:
+        output_parts.append("(无输出)")
 
+    output_parts.append(f"[exit code: {result.returncode}]")
+    return "\n".join(output_parts)

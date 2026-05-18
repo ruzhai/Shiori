@@ -49,9 +49,10 @@ function SettingsModal({ onClose, onSave }) {
   const [apiKey, setApiKey] = useState(saved.api_key || '');
   const [baseUrl, setBaseUrl] = useState(saved.base_url || '');
   const [model, setModel] = useState(saved.model || '');
+  const [useSO, setUseSO] = useState(saved.use_structured_output !== false);
 
   const handleSave = () => {
-    const settings = { api_key: apiKey, base_url: baseUrl, model: model };
+    const settings = { api_key: apiKey, base_url: baseUrl, model: model, use_structured_output: useSO };
     localStorage.setItem('shiori_settings', JSON.stringify(settings));
     onSave(settings);
     onClose();
@@ -63,11 +64,15 @@ function SettingsModal({ onClose, onSave }) {
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
     }
   },
-    React.createElement('div', { style: { background: '#2e2e2e', padding: '24px', borderRadius: '12px', width: '400px' } },
+    React.createElement('div', { style: { background: '#2e2e2e', padding: '24px', borderRadius: '12px', width: '420px' } },
       React.createElement('h2', { style: { marginBottom: '16px', fontSize: '16px' } }, '设置'),
       React.createElement('input', { type: 'password', placeholder: 'API Key', value: apiKey, onChange: e => setApiKey(e.target.value), style: S.input }),
       React.createElement('input', { type: 'text', placeholder: 'Base URL (e.g. https://api.openai.com/v1)', value: baseUrl, onChange: e => setBaseUrl(e.target.value), style: S.input }),
-      React.createElement('input', { type: 'text', placeholder: 'Model (e.g. gpt-4o)', value: model, onChange: e => setModel(e.target.value), style: S.input }),
+      React.createElement('input', { type: 'text', placeholder: 'Model (e.g. gpt-4o / deepseek-reasoner)', value: model, onChange: e => setModel(e.target.value), style: S.input }),
+      React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', fontSize: '12px', marginBottom: '12px', cursor: 'pointer' } },
+        React.createElement('input', { type: 'checkbox', checked: useSO, onChange: e => setUseSO(e.target.checked), style: { cursor: 'pointer' } }),
+        '启用结构化输出（DeepSeek Reasoner 等推理模型请关闭）'
+      ),
       React.createElement('div', { style: { display: 'flex', gap: '8px' } },
         React.createElement('button', { onClick: handleSave, style: S.btn('#1971c2') }, '保存'),
         React.createElement('button', { onClick: onClose, style: S.btn() }, '取消')
@@ -195,7 +200,7 @@ function LogPanel({ logs, onClear }) {
 }
 
 // ── ChatArea ──────────────────────────────────────────────
-function ChatArea({ messages, input, setInput, onSend, onStop, agentReady, running }) {
+function ChatArea({ messages, input, setInput, onSend, onStop, onConfirm, whitelist, setWhitelist, agentReady, running }) {
   const bottomRef = useRef(null);
   useEffect(() => { if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
@@ -222,6 +227,64 @@ function ChatArea({ messages, input, setInput, onSend, onStop, agentReady, runni
     // 消息列表
     React.createElement('div', { style: { flex: 1, overflowY: 'auto', padding: '16px' } },
       messages.map((msg, i) => {
+        // 确认卡片
+        if (msg.role === 'confirm') {
+          const pattern = msg.command.trim().split(/\s+/)[0].toLowerCase();
+          return React.createElement('div', {
+            key: i,
+            style: { marginBottom: '16px', display: 'flex', justifyContent: 'flex-start' }
+          },
+            React.createElement('div', {
+              style: {
+                maxWidth: '85%', padding: '12px 14px', borderRadius: '12px',
+                background: '#2e2e2e', color: '#e0e0e0', fontSize: '13px',
+                borderLeft: '3px solid #f9a825',
+              }
+            },
+              msg.workingDir && React.createElement('div', {
+                style: { fontSize: '10px', color: '#888', marginBottom: '6px' }
+              }, '工作目录: ' + msg.workingDir),
+              React.createElement('pre', {
+                style: {
+                  background: '#1a1a1a', border: '1px solid #3e3e3e',
+                  borderRadius: '6px', padding: '10px', fontSize: '12px',
+                  fontFamily: '"Consolas", "Courier New", monospace',
+                  color: '#66bb6a', whiteSpace: 'pre-wrap',
+                  wordBreak: 'break-all', lineHeight: 1.4,
+                  marginBottom: '10px', maxHeight: '120px', overflowY: 'auto',
+                }
+              }, msg.command),
+              msg.resolved
+                ? React.createElement('div', {
+                    style: {
+                      fontSize: '12px', padding: '6px 10px', borderRadius: '6px',
+                      background: msg.result ? 'rgba(76,175,80,0.12)' : 'rgba(229,57,53,0.12)',
+                      color: msg.result ? '#4caf50' : '#e53935',
+                    }
+                  }, msg.result ? '已允许 ✓' : '已拒绝 ✗')
+                : React.createElement('div', { style: { display: 'flex', gap: '8px' } },
+                    React.createElement('button', {
+                      onClick: () => onConfirm(msg.id, false),
+                      style: { flex: 1, padding: '7px 12px', background: '#e53935', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }
+                    }, '拒绝'),
+                    React.createElement('button', {
+                      onClick: () => onConfirm(msg.id, true),
+                      style: { flex: 1, padding: '7px 12px', background: '#4caf50', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }
+                    }, '允许'),
+                    React.createElement('button', {
+                      onClick: () => {
+                        const updated = [...whitelist, pattern];
+                        setWhitelist(updated);
+                        localStorage.setItem('shiori_whitelist', JSON.stringify(updated));
+                        onConfirm(msg.id, true, pattern);
+                      },
+                      style: { flex: 1, padding: '7px 12px', background: '#3e3e3e', color: '#aaa', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '11px' }
+                    }, '允许所有此类操作')
+                  )
+            )
+          );
+        }
+
         const isUser = msg.role === 'user';
         return React.createElement('div', {
           key: i,
@@ -239,10 +302,34 @@ function ChatArea({ messages, input, setInput, onSend, onStop, agentReady, runni
           },
             isUser
               ? msg.content
-              : React.createElement('div', {
-                  className: 'markdown-content',
-                  dangerouslySetInnerHTML: { __html: renderMarkdown(msg.content) },
-                })
+              : (msg.reasoning || msg.content)
+                ? React.createElement('div', { className: 'markdown-content' },
+                    // 思考过程（折叠框）
+                    msg.reasoning ? React.createElement('details', {
+                      style: { marginBottom: msg.content ? '8px' : '0' },
+                      open: !msg.content
+                    },
+                      React.createElement('summary', {
+                        style: { color: '#999', fontSize: '11px', cursor: 'pointer', userSelect: 'none' }
+                      }, '思考过程'),
+                      React.createElement('div', {
+                        style: {
+                          color: '#aaa', fontSize: '12px', whiteSpace: 'pre-wrap',
+                          borderLeft: '2px solid #555', paddingLeft: '10px', marginTop: '6px',
+                          lineHeight: '1.5'
+                        }
+                      }, msg.reasoning)
+                    ) : null,
+                    // 正文（或思考中占位）
+                    msg.content
+                      ? React.createElement('div', {
+                          dangerouslySetInnerHTML: { __html: renderMarkdown(msg.content) }
+                        })
+                      : msg.reasoning
+                        ? React.createElement('span', { style: { color: '#888', fontSize: '12px' } }, '思考中...')
+                        : null
+                  )
+                : null
           )
         );
       }),
@@ -311,6 +398,10 @@ function App() {
   const [logs, setLogs] = useState([]);
   const [agentReady, setAgentReady] = useState(false);
   const [running, setRunning] = useState(false);
+  const [whitelist, setWhitelist] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('shiori_whitelist')) || []; }
+    catch (_) { return []; }
+  });
 
   // 首次无会话时持久化默认会话
   useEffect(() => {
@@ -338,7 +429,11 @@ function App() {
         body: JSON.stringify(settings)
       });
       const data = await res.json();
-      if (data.status === 'ok') { setAgentReady(true); addLog('info', 'Agent', '初始化成功'); }
+      if (data.status === 'ok') {
+        setAgentReady(true);
+        const soMsg = data.use_structured_output ? '结构化输出' : '纯文本输出';
+        addLog('info', 'Agent', `初始化成功 (${soMsg})`);
+      }
       else { addLog('error', '初始化', data.error); }
     } catch (e) { addLog('error', '连接', `无法连接后端: ${e.message}`); }
   };
@@ -405,6 +500,26 @@ function App() {
     addLog('info', '停止', '用户停止了运行');
   };
 
+  const handleConfirm = async (reqId, approved, addWhitelist) => {
+    const body = { id: reqId, approved };
+    if (addWhitelist) body.add_whitelist = addWhitelist;
+    try {
+      await fetch(`${BACKEND}/api/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) {
+      console.error('Confirm failed:', e);
+    }
+    // 更新确认卡片状态
+    setMessages(prev => prev.map(m =>
+      m.role === 'confirm' && m.id === reqId
+        ? { ...m, resolved: true, result: approved }
+        : m
+    ));
+  };
+
   const handleSend = async (text) => {
     const ses = sessions.find(s => s.id === current);
     if (!ses) return;
@@ -438,17 +553,18 @@ function App() {
       return;
     }
 
-    setMessages(prev => [...prev, { role: 'assistant', content: '▌' }]);
+    setMessages(prev => [...prev, { role: 'assistant', content: '', reasoning: '' }]);
 
     try {
       const res = await fetch(`${BACKEND}/api/chat`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text, thread_id })
+        body: JSON.stringify({ message: text, thread_id, whitelist })
       });
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let content = '';
+      let reasoning = '';
 
       while (true) {
         const { done, value } = await reader.read();
@@ -461,9 +577,24 @@ function App() {
             const ev = JSON.parse(raw);
             if (ev.type === 'tool_start') addLog('tool_start', ev.tool, ev.input);
             else if (ev.type === 'tool_end') addLog('tool_end', ev.tool, ev.output);
+            else if (ev.type === 'reasoning' && ev.data) {
+              reasoning = ev.data;
+              setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content, reasoning }; return m; });
+            }
             else if (ev.type === 'content' && ev.data) {
               content = ev.data;
-              setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content }; return m; });
+              setMessages(prev => { const m = [...prev]; m[m.length - 1] = { role: 'assistant', content, reasoning }; return m; });
+            }
+            else if (ev.type === 'confirm_command') {
+              addLog('info', '确认', ev.command.slice(0, 80));
+              setMessages(prev => [...prev, {
+                role: 'confirm',
+                id: ev.id,
+                command: ev.command,
+                workingDir: ev.working_dir || '',
+                resolved: false,
+                result: null,
+              }]);
             }
             else if (ev.type === 'error') addLog('error', '错误', ev.data);
           } catch (_) {}
@@ -484,7 +615,7 @@ function App() {
     style: { display: 'flex', height: '100vh', background: '#242424', color: '#e0e0e0', fontFamily: '-apple-system,"Segoe UI","Microsoft YaHei UI",sans-serif', fontSize: '13px' }
   },
     React.createElement(SessionList, { sessions, current, onSelect: switchSession, onNew: handleNew, onDelete: handleDelete, onSettings: () => setShowSettings(true) }),
-    React.createElement(ChatArea, { messages, input, setInput, onSend: handleSend, onStop: handleStop, agentReady, running }),
+    React.createElement(ChatArea, { messages, input, setInput, onSend: handleSend, onStop: handleStop, onConfirm: handleConfirm, whitelist, setWhitelist, agentReady, running }),
     React.createElement(LogPanel, { logs, onClear: () => setLogs([]) }),
     showSettings && React.createElement(SettingsModal, { onClose: () => setShowSettings(false), onSave: initAgent })
   );
