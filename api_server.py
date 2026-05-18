@@ -12,7 +12,8 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from main import create_file_agent, AgentSettings, SYSTEM_PROMPT, detect_capabilities
 from main import list_threads, delete_thread, get_thread_messages
-from tools import set_confirm_context, clear_confirm_context, ConfirmContext
+from tools import set_confirm_context, clear_confirm_context, ConfirmContext, set_scholar_api_key, reset_pdf_counter, reset_scholar_errors, reset_scholar_counter
+from langgraph.errors import GraphRecursionError
 
 STRICT_SYSTEM_PROMPT = SYSTEM_PROMPT  # 复用 main.py 中的统一定义
 
@@ -130,6 +131,9 @@ def init_agent():
         _use_structured_output = caps["structured_output"]
 
     try:
+        scholar_key = data.get("scholar_api_key", "")
+        set_scholar_api_key(scholar_key or None)
+
         settings = AgentSettings(
             api_key=data.get("api_key"),
             base_url=base_url,
@@ -137,7 +141,16 @@ def init_agent():
             temperature=float(data.get("temperature", 0.0)),
             system_prompt=STRICT_SYSTEM_PROMPT,
             streaming=True,
-            tools_run_command=True,
+            scholar_api_key=scholar_key or None,
+            tools_run_command=data.get("tools_run_command", True),
+            tools_list_directory=data.get("tools_list_directory", True),
+            tools_read_file=data.get("tools_read_file", True),
+            tools_search_in_files=data.get("tools_search_in_files", True),
+            tools_search_papers=data.get("tools_search_papers", True),
+            tools_get_paper_details=data.get("tools_get_paper_details", True),
+            tools_get_paper_citations=data.get("tools_get_paper_citations", True),
+            tools_get_paper_references=data.get("tools_get_paper_references", True),
+            tools_read_pdf=data.get("tools_read_pdf", True),
             use_structured_output=_use_structured_output,
         )
         agent, config = create_file_agent(
@@ -251,6 +264,9 @@ def chat():
     def generate():
         global _active_confirm_ctx
 
+        reset_pdf_counter()
+        reset_scholar_errors()
+        reset_scholar_counter()
         stop_event.clear()
 
         confirm_ctx = ConfirmContext(whitelist=whitelist, timeout=120.0)
@@ -267,16 +283,25 @@ def chat():
             try:
                 for chunk in agent.stream(
                     {"messages": [{"role": "user", "content": message}]},
-                    {**config, "configurable": {"thread_id": thread_id}},
+                    {**config, "configurable": {"thread_id": thread_id}, "recursion_limit": 200},
                     stream_mode="updates",
                 ):
                     if stop_event.is_set():
                         break
                     output_queue.put(("chunk", chunk))
                 output_queue.put(("done", None))
+            except GraphRecursionError:
+                delete_thread(_db_path(), thread_id)
+                agent_error = "recursion_limit"
+                output_queue.put(("recursion_limit", None))
             except Exception as e:
                 agent_error = str(e)
-                output_queue.put(("error", str(e)))
+                # 孤儿 tool_calls → 自动清理损坏的线程状态
+                if "tool_calls" in agent_error or "insufficient tool messages" in agent_error:
+                    delete_thread(_db_path(), thread_id)
+                    output_queue.put(("reset", agent_error))
+                else:
+                    output_queue.put(("error", agent_error))
             finally:
                 agent_done.set()
 
@@ -317,6 +342,14 @@ def chat():
 
                 elif item_type == "done":
                     yield "data: [DONE]\n\n"
+                    return
+
+                elif item_type == "recursion_limit":
+                    yield f"data: {json.dumps({'type': 'error', 'data': '工具调用次数达到上限，对话已自动重置。请新建会话或重新发送消息。'}, ensure_ascii=False)}\n\n"
+                    return
+
+                elif item_type == "reset":
+                    yield f"data: {json.dumps({'type': 'error', 'data': '检测到对话状态异常，已自动修复。请重新发送消息。'}, ensure_ascii=False)}\n\n"
                     return
 
                 elif item_type == "error":

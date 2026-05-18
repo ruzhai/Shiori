@@ -9,39 +9,77 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-from tools import run_command
+from tools import (
+    run_command,
+    list_directory,
+    read_file,
+    search_in_files,
+    search_papers,
+    get_paper_details,
+    get_paper_citations,
+    get_paper_references,
+    read_pdf,
+)
 
 # =========================
 # 系统提示 & 响应结构
 # =========================
 
-SYSTEM_PROMPT = """你是一个本地命令助手，工作在 Windows 系统上。你可以通过 `run_command` 工具在命令行中执行各种操作。
+SYSTEM_PROMPT = """你是一个多功能智能助手，工作在 Windows 系统上，兼具科研文献分析和命令行操作能力。
 
-## 可用工具
+## 核心能力
 
-只有 `run_command` 一个工具，但它能执行几乎所有 Windows 命令：
+### 学术科研
+- 使用 **search_papers** 在 Semantic Scholar 中搜索学术论文（关键词用英文，精简到 2-4 个核心词）
+- 使用 **get_paper_details** 获取指定论文的详细摘要、作者、引用数等信息
+- 使用 **get_paper_citations** 查看哪些论文引用了目标论文（追踪后续研究）
+- 使用 **get_paper_references** 查看目标论文引用了哪些论文（追溯研究基础）
+- 使用 **read_pdf** 读取 PDF 论文全文内容，按页提取文本
 
-- 文件操作：`dir`、`type`、`findstr`、`copy`、`move` 等
-- 开发工具：`python`、`pip`、`git`、`npm`、`node` 等
-- 网络请求：`curl`、`powershell -Command Invoke-WebRequest` 等
-- 系统信息：`systeminfo`、`tasklist`、`where` 等
-- 任何其他合理的命令行操作
+### 文件操作
+- 使用 **list_directory** 列出目录内容
+- 使用 **read_file** 读取文本文件内容
+- 使用 **search_in_files** 在目录下搜索包含关键字的文件
+
+### 命令行
+- 使用 **run_command** 执行 Windows 命令（需用户确认）
 
 ## 回复决策流程
 
 ### 第1步：判断意图
-  - 用户问候、闲聊、概念性问题 → 直接回复，无需执行命令
-  - 用户要求具体操作（查看文件、搜索内容、运行脚本、查询网络等）→ 使用 run_command
-  - 请求模糊 → 先询问明确信息
+  - 用户提出科研文献相关需求 → 使用学术工具链（search_papers → get_paper_details → get_paper_citations/references）
+  - 用户要求列出目录/读取文件/搜索文件内容 → 使用文件工具
+  - 用户要求执行命令/运行脚本/查询网络 → 使用 run_command
+  - 用户问候、闲聊、概念性问题 → 直接回复
 
-### 第2步：命令执行规则
-  - 直接执行你认为合理的命令，系统会自动处理确认流程，你无需在回复中提及
+### 第2步：文献综述工作流（不遵守将导致任务失败）
+  - **所有学术搜索工具（search_papers、get_paper_details、get_paper_citations、get_paper_references）累计最多调用 15 次，超过后工具会直接拒绝**
+  - search_papers 最多调用 2 次，每次 limit=5。第 1 次拿到结果后挑最相关的 3-5 篇查详情
+  - **不要在查完详情后又去搜第二轮——两轮搜索足够覆盖一个主题**
+  - **不要对每篇论文都查引用和参考文献**——引用/参考文献工具仅在用户明确要求时使用
+  - read_pdf 最多 3 次，写文献综述时完全不需要 read_pdf
+  - **目标：用 8-12 次 scholar 调用完成搜索+详情，然后立即撰写综述**
+
+### 第3步：限流处理
+  - 任何工具返回"限流""重试耗尽""429"→ 停止搜索，用已有信息回答
+  - 搜索返回空结果 → 告知用户，不要换关键词重搜
+  - 连续 2 个工具返回错误 → 立即停止，基于已有信息回答
+
+### 第4步：命令执行规则
+  - run_command 执行前系统会自动弹出确认框，你无需在回复中提及
   - 对于明显危险的操作（format、diskpart、删除系统文件等），应主动提醒用户风险
-  - 获得结果后立即向用户报告，不要连续调用多个工具
 
-## 回答风格
-- 使用简体中文，语气友好直接
-- 完成操作后主动问用户是否需要进一步处理"""
+## 搜索策略
+- 使用 search_papers（Semantic Scholar），数据更全、引用信息更丰富
+- 关键词始终使用英文，limit 使用默认值 5
+
+## 输出格式
+- 论文信息用结构化 Markdown 展示，包含标题、作者、年份、引用数、摘要要点
+- 使用简体中文，语气专业友好
+
+## 路径规则
+- 文件路径由用户提供
+- Windows 格式：D:\\xxx\\yyy"""
 
 
 @dataclass
@@ -57,11 +95,22 @@ class AgentSettings:
     model: Optional[str] = None
     temperature: float = 0
 
+    # Semantic Scholar API key
+    scholar_api_key: Optional[str] = None
+
     # 系统提示词
     system_prompt: str = SYSTEM_PROMPT
 
     # 工具开关
     tools_run_command: bool = True
+    tools_list_directory: bool = True
+    tools_read_file: bool = True
+    tools_search_in_files: bool = True
+    tools_search_papers: bool = True
+    tools_get_paper_details: bool = True
+    tools_get_paper_citations: bool = True
+    tools_get_paper_references: bool = True
+    tools_read_pdf: bool = True
 
     # 结构化输出开关（自动检测，也可手动覆盖）
     use_structured_output: bool = True
@@ -313,6 +362,22 @@ def _build_tools(settings: AgentSettings) -> list[Callable[..., Any]]:
     tools: list[Callable[..., Any]] = []
     if settings.tools_run_command:
         tools.append(run_command)
+    if settings.tools_list_directory:
+        tools.append(list_directory)
+    if settings.tools_read_file:
+        tools.append(read_file)
+    if settings.tools_search_in_files:
+        tools.append(search_in_files)
+    if settings.tools_search_papers:
+        tools.append(search_papers)
+    if settings.tools_get_paper_details:
+        tools.append(get_paper_details)
+    if settings.tools_get_paper_citations:
+        tools.append(get_paper_citations)
+    if settings.tools_get_paper_references:
+        tools.append(get_paper_references)
+    if settings.tools_read_pdf:
+        tools.append(read_pdf)
     return tools
 
 
@@ -357,7 +422,10 @@ def create_file_agent(
         checkpointer=checkpointer,
     )
 
-    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    config: dict[str, Any] = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": 200,
+    }
     if callbacks:
         config["callbacks"] = callbacks
     return agent, config

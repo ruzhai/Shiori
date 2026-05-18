@@ -5,6 +5,12 @@ import threading
 
 from langchain.tools import tool
 
+# ── PDF 阅读（PyMuPDF）──────────────────────────────
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
 
 # =========================
 # 确认上下文（线程安全）
@@ -194,3 +200,457 @@ def run_command(command: str, working_dir: str = "") -> str:
 
     output_parts.append(f"[exit code: {result.returncode}]")
     return "\n".join(output_parts)
+
+
+# =========================
+# 文件操作工具
+# =========================
+
+
+@tool
+def list_directory(path: str) -> str:
+    """列出某个目录下的文件和子目录。
+
+    参数:
+        path: 要查看的目录绝对路径。
+    返回:
+        一个可直接展示的文本列表，包含 [DIR]/[FILE] 标记及文件大小。
+    """
+    normalized = os.path.normpath(path)
+    if normalized in (r'C:\\', r'D:\\', r'E:\\', '/', 'C:', 'D:', 'E:'):
+        return "请提供具体的目录路径，而不是根目录。"
+
+    if not os.path.exists(path):
+        return f"目录不存在：{path}"
+    if not os.path.isdir(path):
+        return f"给定路径不是目录：{path}"
+
+    try:
+        entries = os.listdir(path)
+    except Exception as e:
+        return f"读取目录失败：{e}"
+
+    if not entries:
+        return f"目录为空：{path}"
+
+    lines: list[str] = []
+    for name in entries:
+        full = os.path.join(path, name)
+        if os.path.isdir(full):
+            lines.append(f"[DIR]  {name}")
+        else:
+            try:
+                size = os.path.getsize(full)
+                lines.append(f"[FILE] {name}  ({size} bytes)")
+            except OSError:
+                lines.append(f"[FILE] {name}")
+
+    return "目录内容：\n" + "\n".join(sorted(lines))
+
+
+@tool
+def read_file(path: str, max_chars: int = 4000, start: int = 0) -> str:
+    """读取指定文本文件内容，用于分析和总结。
+
+    参数:
+        path: 文件绝对路径
+        max_chars: 最多读取的字符数（默认 4000）
+        start: 从第几个字符开始读取（默认 0，即从头开始）
+    """
+
+    if not os.path.exists(path):
+        return f"文件不存在：{path}"
+    if not os.path.isfile(path):
+        return f"给定路径不是文件：{path}"
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            all_content = f.read()
+    except Exception as e:
+        return f"读取文件失败：{e}"
+
+    total = len(all_content)
+    if start >= total:
+        return f"文件路径：{path}\n文件总字符数：{total}，start={start} 已超出文件末尾，无更多内容。"
+
+    chunk = all_content[start: start + max_chars]
+    end = start + len(chunk)
+    suffix = f"\n\n[已读取字符 {start}–{end} / 共 {total}。{'文件已读完。' if end >= total else f'如需继续，请用 start={end} 调用。'}]"
+    return f"文件路径：{path}\n=== 内容开始 ===\n{chunk}{suffix}"
+
+
+@tool
+def search_in_files(root: str, keyword: str, max_results: int = 20) -> str:
+    """在某个目录（包含子目录）下搜索包含指定关键字的文本文件。
+
+    参数：
+    - root: 起始搜索目录绝对路径
+    - keyword: 要搜索的字符串
+    - max_results: 最多返回多少条匹配结果
+    """
+
+    if not os.path.exists(root):
+        return f"目录不存在：{root}"
+    if not os.path.isdir(root):
+        return f"给定路径不是目录：{root}"
+
+    matches: list[str] = []
+    for dirpath, _, filenames in os.walk(root):
+        for filename in filenames:
+            if len(matches) >= max_results:
+                break
+            full_path = os.path.join(dirpath, filename)
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line_no, line in enumerate(f, start=1):
+                        if keyword in line:
+                            snippet = line.strip()
+                            matches.append(f"{full_path} (L{line_no}): {snippet[:200]}")
+                            break
+            except Exception:
+                continue
+
+    if not matches:
+        return f"在目录 {root} 下未找到包含 {keyword!r} 的文本文件。"
+
+    header = f"在目录 {root} 下找到包含 {keyword!r} 的文件（最多 {max_results} 条）："
+    return header + "\n" + "\n".join(matches)
+
+
+# =========================
+# 学术搜索工具
+# =========================
+
+from semantic_scholar import create_connector, Paper
+
+# 模块级 Semantic Scholar API key（由 api_server 在初始化时设置）
+_scholar_api_key: str | None = None
+
+
+def set_scholar_api_key(key: str | None) -> None:
+    global _scholar_api_key
+    _scholar_api_key = key
+
+
+# PDF 阅读计数器（防止 Agent 无休止逐页读论文）
+_pdf_read_count: int = 0
+_PDF_READ_LIMIT = 3
+
+
+def reset_pdf_counter() -> None:
+    global _pdf_read_count
+    _pdf_read_count = 0
+
+
+# Scholar API 连续错误计数器（防止 Agent 限流后无限重试）
+_scholar_error_streak: int = 0
+_SCHOLAR_ERROR_LIMIT = 2
+
+_FORCE_STOP_MSG = (
+    "API 暂时限流。你已经获取了足够的论文摘要和引用信息，"
+    "请立即基于已有数据撰写文献综述，禁止再调用任何搜索工具。"
+)
+
+# Scholar 工具总调用计数器（防止 Agent 无限搜索永不输出）
+_scholar_call_count: int = 0
+_SCHOLAR_CALL_LIMIT = 15
+
+_SCHOLAR_TOTAL_LIMIT_MSG = (
+    "已达学术搜索总次数上限。你已经获取了大量论文信息，"
+    "请立即基于已有数据撰写文献综述，不要再调用任何搜索或查询工具。"
+)
+
+
+def reset_scholar_errors() -> None:
+    global _scholar_error_streak
+    _scholar_error_streak = 0
+
+
+def _handle_scholar_error(last_error: str | None) -> str:
+    """连续限流达到阈值时，返回强制停止消息；否则返回普通错误。"""
+    global _scholar_error_streak
+    _scholar_error_streak += 1
+    if _scholar_error_streak >= _SCHOLAR_ERROR_LIMIT:
+        return _FORCE_STOP_MSG
+    return f"学术搜索服务暂时不可用（{last_error}）。请稍后再试。"
+
+
+def reset_scholar_counter() -> None:
+    global _scholar_call_count
+    _scholar_call_count = 0
+
+
+def _check_scholar_limit() -> str | None:
+    """检查 scholar 工具总调用次数；超限返回强制停止消息，否则返回 None。"""
+    global _scholar_call_count
+    _scholar_call_count += 1
+    if _scholar_call_count > _SCHOLAR_CALL_LIMIT:
+        return _SCHOLAR_TOTAL_LIMIT_MSG
+    return None
+
+
+def _fmt_paper(p: Paper, idx: int = 0) -> str:
+    authors = ", ".join(p.authors[:5])
+    if len(p.authors) > 5:
+        authors += " 等"
+    lines = [
+        f"{idx}. {p.title}" if idx else p.title,
+        f"   作者: {authors}" if authors else "   作者: 未知",
+        f"   年份: {p.year} | 引用: {p.citation_count}",
+    ]
+    if p.abstract:
+        abstract_short = p.abstract[:200].replace("\n", " ")
+        lines.append(f"   摘要: {abstract_short}...")
+    if p.venue:
+        lines.append(f"   发表: {p.venue}")
+    if p.open_access_url:
+        lines.append(f"   PDF: {p.open_access_url}")
+    if p.url:
+        lines.append(f"   链接: {p.url}")
+    lines.append(f"   ID: {p.paper_id}")
+    return "\n".join(lines)
+
+
+@tool
+def search_papers(query: str, limit: int = 5) -> str:
+    """搜索学术论文。当用户想查找某个主题的论文时使用。
+
+    参数:
+        query: 搜索关键词（建议使用英文，如 "deep learning transformer"）
+        limit: 返回的最大论文数量（默认5，最多10）
+    返回:
+        格式化的论文列表，包含标题、作者、年份、引用数、摘要和论文ID。
+    """
+    limit_msg = _check_scholar_limit()
+    if limit_msg:
+        return limit_msg
+    conn = create_connector(api_key=_scholar_api_key)
+    papers, ok = conn.search(query, limit=min(limit, 10))
+    if not ok:
+        return _handle_scholar_error(conn.last_error)
+    reset_scholar_errors()
+    if not papers:
+        return f"未找到与 '{query}' 相关的论文。请尝试调整关键词。"
+    lines = [f"搜索 '{query}' 的结果（共 {len(papers)} 篇）：\n"]
+    for i, p in enumerate(papers, 1):
+        lines.append(_fmt_paper(p, i))
+        lines.append("")
+    return "\n".join(lines)
+
+
+@tool
+def get_paper_details(paper_id: str) -> str:
+    """获取指定论文的详细信息（完整摘要、作者、引用数等）。
+
+    参数:
+        paper_id: Semantic Scholar 论文 ID（从 search_papers 结果中获取）
+    """
+    limit_msg = _check_scholar_limit()
+    if limit_msg:
+        return limit_msg
+    conn = create_connector(api_key=_scholar_api_key)
+    paper, ok = conn.get_paper(paper_id.strip())
+    if not ok:
+        return _handle_scholar_error(conn.last_error)
+    reset_scholar_errors()
+    if paper is None:
+        return f"未找到论文 ID 为 '{paper_id.strip()}' 的论文。请检查 ID 是否来自最近的搜索结果，或尝试重新搜索。"
+    return "论文详情：\n\n" + _fmt_paper(paper)
+
+
+@tool
+def get_paper_citations(paper_id: str, limit: int = 5) -> str:
+    """获取引用了某篇论文的其他论文（即哪些论文引用了这篇）。
+
+    参数:
+        paper_id: 目标论文的 Semantic Scholar ID
+        limit: 返回的最大数量（默认5，最多10）
+    """
+    limit_msg = _check_scholar_limit()
+    if limit_msg:
+        return limit_msg
+    conn = create_connector(api_key=_scholar_api_key)
+    papers, ok = conn.get_citations(paper_id.strip(), limit=min(limit, 10))
+    if not ok:
+        return _handle_scholar_error(conn.last_error)
+    reset_scholar_errors()
+    if not papers:
+        return f"未找到引用论文 ID 为 '{paper_id.strip()}' 的论文。"
+    lines = [f"引用了论文 {paper_id.strip()} 的论文（共 {len(papers)} 篇）：\n"]
+    for i, p in enumerate(papers, 1):
+        lines.append(_fmt_paper(p, i))
+        lines.append("")
+    return "\n".join(lines)
+
+
+@tool
+def get_paper_references(paper_id: str, limit: int = 5) -> str:
+    """获取某篇论文引用的参考文献（即这篇论文引用了哪些论文）。
+
+    参数:
+        paper_id: 目标论文的 Semantic Scholar ID
+        limit: 返回的最大数量（默认5，最多10）
+    """
+    limit_msg = _check_scholar_limit()
+    if limit_msg:
+        return limit_msg
+    conn = create_connector(api_key=_scholar_api_key)
+    papers, ok = conn.get_references(paper_id.strip(), limit=min(limit, 10))
+    if not ok:
+        return _handle_scholar_error(conn.last_error)
+    reset_scholar_errors()
+    if not papers:
+        return f"未找到论文 {paper_id.strip()} 的参考文献。"
+    lines = [f"论文 {paper_id.strip()} 的参考文献（共 {len(papers)} 篇）：\n"]
+    for i, p in enumerate(papers, 1):
+        lines.append(_fmt_paper(p, i))
+        lines.append("")
+    return "\n".join(lines)
+
+
+# =========================
+# PDF 文献阅读工具
+# =========================
+
+
+def _is_url(path: str) -> bool:
+    return path.startswith("http://") or path.startswith("https://")
+
+
+def _download_pdf(url: str) -> str | None:
+    """流式下载 PDF 到临时文件，返回临时文件路径。失败返回 None。"""
+    import tempfile
+    try:
+        import requests as _requests
+        resp = _requests.get(url, timeout=(10, 60), stream=True)
+        resp.raise_for_status()
+        content_type = resp.headers.get("content-type", "")
+
+        fd, tmp_path = tempfile.mkstemp(suffix=".pdf")
+        first_chunk = True
+        max_size = 50 * 1024 * 1024  # 50MB 上限
+        total = 0
+        with os.fdopen(fd, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    if first_chunk and not content_type.startswith("application/pdf") and not chunk.startswith(b"%PDF"):
+                        resp.close()
+                        os.unlink(tmp_path)
+                        return None
+                    first_chunk = False
+                    total += len(chunk)
+                    if total > max_size:
+                        resp.close()
+                        os.unlink(tmp_path)
+                        return None
+                    f.write(chunk)
+        return tmp_path
+    except Exception:
+        return None
+
+
+@tool
+def read_pdf(path: str, max_chars: int = 8000, start: int = 0) -> str:
+    """读取指定 PDF 文件内容，用于分析学术论文全文。支持本地路径和 URL。
+
+    参数:
+        path: PDF 文件的绝对路径或 HTTP/HTTPS URL
+        max_chars: 最多读取的字符数（默认 8000，不要传小值）
+        start: 从第几个字符开始读取（默认 0，即从头开始）
+
+    注意: 如果是 URL，会自动下载到临时文件后读取。每个 URL 只尝试一次，失败后不要重试。
+    """
+    global _pdf_read_count
+    _pdf_read_count += 1
+
+    if _pdf_read_count > _PDF_READ_LIMIT:
+        return (
+            f"⚠️ 本次对话已读取 {_PDF_READ_LIMIT} 篇/次 PDF，达到上限。\n"
+            "请基于已获取的论文摘要（get_paper_details）和已有信息直接撰写回答，"
+            "不要再尝试读取更多 PDF。"
+        )
+
+    if fitz is None:
+        return "PDF 阅读功能不可用：PyMuPDF 未安装。请运行 pip install PyMuPDF。"
+
+    original_path = path
+    tmp_file: str | None = None
+
+    # URL 自动下载
+    if _is_url(path):
+        tmp_file = _download_pdf(path)
+        if tmp_file is None:
+            return f"无法下载 PDF：{path}\n可能原因：链接已失效、不是 PDF 文件、或网络不可达。请换一篇论文尝试，不要重试同一链接。"
+        path = tmp_file
+
+    if not os.path.exists(path):
+        return f"PDF 文件不存在：{path}"
+    if not os.path.isfile(path):
+        return f"给定路径不是文件：{path}"
+    if not path.lower().endswith('.pdf'):
+        return f"文件不是 PDF 格式：{path}"
+
+    try:
+        doc = fitz.open(path)
+    except Exception as e:
+        return f"无法打开 PDF 文件：{e}"
+
+    _stop_hint = (
+        "\n\n⚠️ 你正在撰写文献综述。论文摘要（get_paper_details 返回的 abstract）已经包含足够信息。"
+        "请立即停止读取 PDF，基于已获取的摘要开始撰写综述，不要再调用 read_pdf。"
+    )
+
+    try:
+        total_pages = len(doc)
+        all_text_parts: list[str] = []
+        total_chars = 0
+
+        for page_idx in range(total_pages):
+            try:
+                page = doc[page_idx]
+                page_text = page.get_text()
+                if page_text.strip():
+                    part = f"[第{page_idx + 1}页]\n{page_text.strip()}"
+                    all_text_parts.append(part)
+                    total_chars += len(part)
+                if total_chars >= start + max_chars:
+                    partial_text = "\n\n".join(all_text_parts)
+                    total_extracted = len(partial_text)
+                    if start >= total_extracted:
+                        return f"PDF 文件路径：{original_path}\n总页数：{total_pages}\n已提取字符数：{total_extracted}\nstart={start} 已超出末尾，无更多内容。{_stop_hint}"
+                    chunk = partial_text[start: start + max_chars]
+                    end = start + len(chunk)
+                    return (
+                        f"PDF 文件路径：{original_path}\n"
+                        f"总页数：{total_pages}（已读取前 {page_idx + 1} 页）\n"
+                        f"=== 内容开始 ===\n{chunk}\n\n"
+                        f"[已读取字符 {start}–{end} / 已提取 {total_extracted}。"
+                        f"{'文件已读完。' if end >= total_extracted else f'如需继续，请用 start={end} 调用。'}]{_stop_hint}"
+                    )
+            except Exception:
+                all_text_parts.append(f"[第{page_idx + 1}页] (无法读取)")
+    finally:
+        doc.close()
+        if tmp_file:
+            try:
+                os.unlink(tmp_file)
+            except Exception:
+                pass
+
+    full_text = "\n\n".join(all_text_parts)
+    total_extracted = len(full_text)
+
+    if start >= total_extracted:
+        return f"PDF 文件路径：{original_path}\n总页数：{total_pages}\n已提取总字符数：{total_extracted}\nstart={start} 已超出末尾，无更多内容。{_stop_hint}"
+
+    chunk = full_text[start: start + max_chars]
+    end = start + len(chunk)
+    return (
+        f"PDF 文件路径：{original_path}\n"
+        f"总页数：{total_pages}\n"
+        f"=== 内容开始 ===\n{chunk}\n\n"
+        f"[已读取字符 {start}–{end} / 共 {total_extracted}（共 {total_pages} 页）。"
+        f"{'文件已读完。' if end >= total_extracted else f'如需继续，请用 start={end} 调用。'}]{_stop_hint}"
+    )
+
+

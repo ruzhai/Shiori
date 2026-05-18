@@ -49,10 +49,30 @@ function SettingsModal({ onClose, onSave }) {
   const [apiKey, setApiKey] = useState(saved.api_key || '');
   const [baseUrl, setBaseUrl] = useState(saved.base_url || '');
   const [model, setModel] = useState(saved.model || '');
+  const [scholarKey, setScholarKey] = useState(saved.scholar_api_key || '');
   const [useSO, setUseSO] = useState(saved.use_structured_output !== false);
+  const [showTools, setShowTools] = useState(false);
+
+  // 工具开关状态
+  const toolKeys = [
+    { key: 'tools_run_command', label: 'run_command - 命令行执行' },
+    { key: 'tools_list_directory', label: 'list_directory - 列出目录' },
+    { key: 'tools_read_file', label: 'read_file - 读取文件' },
+    { key: 'tools_search_in_files', label: 'search_in_files - 搜索文件内容' },
+    { key: 'tools_search_papers', label: 'search_papers - Semantic Scholar 搜索' },
+    { key: 'tools_get_paper_details', label: 'get_paper_details - 论文详情' },
+    { key: 'tools_get_paper_citations', label: 'get_paper_citations - 引用查询' },
+    { key: 'tools_get_paper_references', label: 'get_paper_references - 参考文献' },
+    { key: 'tools_read_pdf', label: 'read_pdf - PDF 阅读' },
+  ];
+  const [tools, setTools] = useState(() => {
+    const initial = {};
+    toolKeys.forEach(t => { initial[t.key] = saved[t.key] !== false; });
+    return initial;
+  });
 
   const handleSave = () => {
-    const settings = { api_key: apiKey, base_url: baseUrl, model: model, use_structured_output: useSO };
+    const settings = { api_key: apiKey, base_url: baseUrl, model: model, scholar_api_key: scholarKey, use_structured_output: useSO, ...tools };
     localStorage.setItem('shiori_settings', JSON.stringify(settings));
     onSave(settings);
     onClose();
@@ -69,9 +89,35 @@ function SettingsModal({ onClose, onSave }) {
       React.createElement('input', { type: 'password', placeholder: 'API Key', value: apiKey, onChange: e => setApiKey(e.target.value), style: S.input }),
       React.createElement('input', { type: 'text', placeholder: 'Base URL (e.g. https://api.openai.com/v1)', value: baseUrl, onChange: e => setBaseUrl(e.target.value), style: S.input }),
       React.createElement('input', { type: 'text', placeholder: 'Model (e.g. gpt-4o / deepseek-reasoner)', value: model, onChange: e => setModel(e.target.value), style: S.input }),
+      React.createElement('input', { type: 'password', placeholder: 'Semantic Scholar API Key (可选，1 rps 限流)', value: scholarKey, onChange: e => setScholarKey(e.target.value), style: S.input }),
       React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', fontSize: '12px', marginBottom: '12px', cursor: 'pointer' } },
         React.createElement('input', { type: 'checkbox', checked: useSO, onChange: e => setUseSO(e.target.checked), style: { cursor: 'pointer' } }),
         '启用结构化输出（DeepSeek Reasoner 等推理模型请关闭）'
+      ),
+      // 工具开关折叠区
+      React.createElement('div', { style: { marginBottom: '12px' } },
+        React.createElement('button', {
+          onClick: () => setShowTools(!showTools),
+          style: { ...S.btn(), width: '100%', textAlign: 'left', padding: '8px 12px', fontSize: '12px', color: '#a0a0a0' }
+        }, (showTools ? '▼' : '▶') + ' 工具开关'),
+        showTools && React.createElement('div', {
+          style: { marginTop: '8px', padding: '8px 12px', background: '#1e1e1e', borderRadius: '8px', maxHeight: '240px', overflowY: 'auto' }
+        },
+          toolKeys.map(tk =>
+            React.createElement('label', {
+              key: tk.key,
+              style: { display: 'flex', alignItems: 'center', gap: '8px', color: '#a0a0a0', fontSize: '11px', padding: '3px 0', cursor: 'pointer' }
+            },
+              React.createElement('input', {
+                type: 'checkbox',
+                checked: tools[tk.key],
+                onChange: e => setTools(prev => ({ ...prev, [tk.key]: e.target.checked })),
+                style: { cursor: 'pointer' }
+              }),
+              tk.label
+            )
+          )
+        )
       ),
       React.createElement('div', { style: { display: 'flex', gap: '8px' } },
         React.createElement('button', { onClick: handleSave, style: S.btn('#1971c2') }, '保存'),
@@ -377,7 +423,7 @@ function saveMessages(threadId, msgs) {
   catch (_) {}
 }
 
-const DEFAULT_WELCOME = [{ role: 'assistant', content: '你好，我是 Shiori，一个文件 agent 助手。' }];
+const DEFAULT_WELCOME = [{ role: 'assistant', content: '你好，我是 Shiori，一个多功能智能助手。我可以帮你搜索学术论文（Semantic Scholar）、阅读 PDF、管理文件、执行命令行操作。请在设置中配置 API 后开始使用。' }];
 
 // ── App ───────────────────────────────────────────────────
 function App() {
